@@ -69,12 +69,11 @@
     </div>
 
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-auth.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
     <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-messaging.js"></script>
 
     <script>
-        // --- 1. PASTE YOUR FIREBASE CONFIG HERE ---
+        // --- 1. YOUR FIREBASE CONFIG ---
         const firebaseConfig = {
             apiKey: "AIzaSyBMJuAmIAqDUXhZcGBHq8CszhJL92VaZ64",
             authDomain: "information-project1.firebaseapp.com",
@@ -88,12 +87,10 @@
 
         // Initialize Firebase
         const app = firebase.initializeApp(firebaseConfig);
-        const auth = firebase.auth();
         const database = firebase.database();
         const messaging = firebase.messaging();
 
         // --- 2. PASTE YOUR VAPID KEY FROM FIREBASE CONSOLE HERE ---
-        // This key is used to authorize sending push notifications
         const VAPID_KEY = "BF0XL6TATWEVgiN1aZwrPws32D4AAxabxdRs0zXbKSarbfPlCIxpXjMC2F5ap52xFLDnP_TAYmInDPIM6vgzmeQ";
 
         // --- 3. UI ELEMENTS ---
@@ -102,19 +99,16 @@
         const statusDiv = document.getElementById('status');
         
         // --- 4. CORE LOGIC ---
-        // This is the code for our service worker. It must be in a separate file,
-        // but with this trick, we can keep it in one file for development.
+        // This is the code for our service worker.
         const serviceWorkerCode = `
             importScripts("https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js");
             importScripts("https://www.gstatic.com/firebasejs/8.10.1/firebase-messaging.js");
 
-            // Use the same config as the main app
             const firebaseConfig = ${JSON.stringify(firebaseConfig)};
             
             firebase.initializeApp(firebaseConfig);
             const messaging = firebase.messaging();
 
-            // This listener handles messages from the main page to schedule notifications
             self.addEventListener('message', (event) => {
                 console.log('Service Worker received a message:', event.data);
                 const { appointmentTime, type } = event.data;
@@ -149,54 +143,32 @@
 
         // Register the service worker
         if ('serviceWorker' in navigator) {
-            // Create a Blob from the service worker code string
             const blob = new Blob([serviceWorkerCode], { type: 'application/javascript' });
-            // Create a URL for the Blob
             const swUrl = URL.createObjectURL(blob);
 
             navigator.serviceWorker.register(swUrl)
                 .then(registration => {
                     console.log('Service Worker registered successfully:', registration);
                     messaging.useServiceWorker(registration);
-                    requestNotificationPermission();
+                    requestNotificationPermission(); // Request permission right away
                 })
                 .catch(err => console.error('Service Worker registration failed:', err));
         }
 
         async function requestNotificationPermission() {
             try {
-                // Sign in anonymously to get a UID for database rules
-                await auth.signInAnonymously();
-                const user = auth.currentUser;
-
-                if (!user) {
-                    statusDiv.textContent = "Could not authenticate user.";
-                    return;
-                }
-                
                 statusDiv.textContent = 'Requesting notification permission...';
                 const permission = await Notification.requestPermission();
                 
                 if (permission === 'granted') {
-                    console.log('Notification permission granted.');
                     statusDiv.textContent = 'Notification permission granted! Ready to set appointment.';
-                    const fcmToken = await messaging.getToken({ vapidKey: VAPID_KEY });
-                    
-                    if (fcmToken) {
-                        console.log('FCM Token:', fcmToken);
-                        // Save the token to the database associated with the user
-                        const userRef = database.ref(`appointments/${user.uid}`);
-                        await userRef.set({ fcmToken: fcmToken });
-                        console.log("FCM Token saved to database.");
-                    } else {
-                        statusDiv.textContent = 'Could not get notification token.';
-                    }
+                    // We don't save the token here anymore, we save it with the appointment
                 } else {
                     statusDiv.textContent = 'Notification permission denied.';
                     console.log('Unable to get permission to notify.');
                 }
             } catch (error) {
-                console.error('An error occurred: ', error);
+                console.error('Error requesting permission: ', error);
                 statusDiv.textContent = 'Error during notification setup.';
             }
         }
@@ -204,15 +176,9 @@
         // Event listener for the button
         scheduleBtn.addEventListener('click', async () => {
             const selectedTime = appointmentTimeInput.value;
-            const user = auth.currentUser;
 
             if (!selectedTime) {
                 alert('Please select a valid date and time.');
-                return;
-            }
-
-            if (!user) {
-                alert('User not authenticated. Please refresh and try again.');
                 return;
             }
 
@@ -221,28 +187,41 @@
                 alert('Cannot schedule an appointment in the past.');
                 return;
             }
+            
+            scheduleBtn.disabled = true;
+            statusDiv.textContent = "Setting up your appointment...";
 
             try {
-                // Save appointment time to Firebase Real-Time Database
-                const userRef = database.ref(`appointments/${user.uid}`);
-                await userRef.update({ appointmentTime: selectedTime });
+                // Get the FCM token for this device
+                const fcmToken = await messaging.getToken({ vapidKey: VAPID_KEY });
                 
-                statusDiv.textContent = `Appointment set for ${appointmentDate.toLocaleString()}. You will be notified.`;
-                console.log('Appointment time saved!');
-
-                // Tell the service worker to schedule the notifications
-                if (navigator.serviceWorker.controller) {
-                    navigator.serviceWorker.controller.postMessage({
-                        type: 'SCHEDULE_NOTIFICATIONS',
+                if (fcmToken) {
+                    // Create a new entry in the 'appointments' list
+                    const newAppointmentRef = database.ref('appointments').push();
+                    await newAppointmentRef.set({
+                        fcmToken: fcmToken,
                         appointmentTime: selectedTime
                     });
+                    
+                    statusDiv.textContent = `Appointment set for ${appointmentDate.toLocaleString()}. You will be notified.`;
+                    console.log('Appointment saved to public list!');
+
+                    // Tell the service worker to schedule the notifications
+                    if (navigator.serviceWorker.controller) {
+                        navigator.serviceWorker.controller.postMessage({
+                            type: 'SCHEDULE_NOTIFICATIONS',
+                            appointmentTime: selectedTime
+                        });
+                    }
+                } else {
+                     statusDiv.textContent = "Could not get notification token. Please grant permission.";
                 }
-                scheduleBtn.disabled = true;
-                setTimeout(() => { scheduleBtn.disabled = false; }, 60000); // Re-enable button after a minute
 
             } catch (error) {
                 console.error('Failed to save appointment:', error);
                 statusDiv.textContent = 'Error saving appointment.';
+            } finally {
+                scheduleBtn.disabled = false;
             }
         });
 
